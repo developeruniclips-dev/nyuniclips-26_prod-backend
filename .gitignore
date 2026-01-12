@@ -1,6 +1,17 @@
 node_modules/
 .env
+.env.local
+.env.production
 uploads/
 *.log
 .DS_Store
 dist/
+
+# SSL Certificates
+*.crt
+*.pem
+ca-certificate.crt
+
+# Database backups
+*.sql
+backups/
