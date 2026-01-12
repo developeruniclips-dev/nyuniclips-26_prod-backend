@@ -1,0 +1,26 @@
+const { Router } = require('express');
+const userRoutes = require('./userRoutes');
+const authRouter = require('./authRoutes');
+const videoRoutes = require('./videoRoutes');
+const purchaseRoutes = require('./purchaseRoutes');
+const subjectRoutes = require('./subjectRoutes');
+const scholarSubjectRouter = require('./scholarSubjects');
+const scholarProfileRoutes = require('./scholarProfileRoutes');
+const stripeConnectRoutes = require('./stripeConnectRoutes');
+const statsRoutes = require('./statsRoutes');
+const libraryRoutes = require('./libraryRoutes');
+
+const routes = Router();
+
+routes.use("/users", userRoutes);
+routes.use("/auth", authRouter);
+routes.use("/videos", videoRoutes);
+routes.use("/purchases", purchaseRoutes);
+routes.use("/subjects", subjectRoutes);
+routes.use("/scholar-subjects", scholarSubjectRouter);
+routes.use("/scholar-profile", scholarProfileRoutes);
+routes.use("/stripe-connect", stripeConnectRoutes);
+routes.use("/stats", statsRoutes);
+routes.use("/library", libraryRoutes);
+
+module.exports = routes;
