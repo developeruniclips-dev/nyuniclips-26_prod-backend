@@ -5,11 +5,11 @@ const SubjectModel = {
 
     findById: (id) => pool.query("SELECT * FROM subjects WHERE id = ?", [id]),
 
-    create: (name, description) => 
-        pool.query("INSERT INTO subjects (name, description) VALUES (?, ?)", [name, description]),
+    create: (name) => 
+        pool.query("INSERT INTO subjects (name) VALUES (?)", [name]),
 
-    update: (id, name, description) => {
-        return pool.query("UPDATE subjects SET name = ?, description = ? WHERE id = ?", [name, description, id]);
+    update: (id, name) => {
+        return pool.query("UPDATE subjects SET name = ? WHERE id = ?", [name, id]);
     },
 
     delete: (id) => {
@@ -26,7 +26,7 @@ const SubjectModel = {
 
     // Get subject with bundle price
     findByIdWithPrice: (id) => pool.query(
-        "SELECT id, name, description, degree_programmes, bundle_price, bundle_price_updated_at FROM subjects WHERE id = ?", 
+        "SELECT id, name, degree_programmes, bundle_price, bundle_price_updated_at FROM subjects WHERE id = ?", 
         [id]
     )
 };
