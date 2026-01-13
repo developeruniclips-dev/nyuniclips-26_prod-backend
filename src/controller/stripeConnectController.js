@@ -382,6 +382,18 @@ const getAllScholarsStripeStatus = async (req, res) => {
             `);
         }
 
+        // Country code to name mapping
+        const countryNames = {
+            'FI': 'Finland',
+            'US': 'United States',
+            'GB': 'United Kingdom',
+            'DE': 'Germany',
+            'SE': 'Sweden',
+            'NO': 'Norway',
+            'DK': 'Denmark',
+            'EE': 'Estonia'
+        };
+
         // Check if Stripe is properly configured
         const stripeConfigured = process.env.STRIPE_SECRET_KEY && 
                                  !process.env.STRIPE_SECRET_KEY.includes('dummy') &&
@@ -390,11 +402,29 @@ const getAllScholarsStripeStatus = async (req, res) => {
         // Enrich with live Stripe data only if Stripe is configured
         const scholarsWithStripeStatus = await Promise.all(
             scholars.map(async (scholar) => {
+                // Calculate pending balance for this scholar
+                const [salesData] = await pool.query(`
+                    SELECT COALESCE(SUM(amount), 0) as total_revenue
+                    FROM subject_purchases WHERE scholar_id = ?
+                `, [scholar.id]);
+                
+                const [payoutsData] = await pool.query(`
+                    SELECT COALESCE(SUM(amount), 0) as total_paid
+                    FROM scholar_payouts WHERE scholar_user_id = ? AND status = 'completed'
+                `, [scholar.id]);
+                
+                const totalRevenue = parseFloat(salesData[0]?.total_revenue) || 0;
+                const totalPaid = parseFloat(payoutsData[0]?.total_paid) || 0;
+                const scholarEarnings = totalRevenue * 0.70; // 70% for under 100 sales
+                const pendingBalance = Math.max(0, scholarEarnings - totalPaid);
+
                 if (!scholar.stripe_account_id) {
                     return {
                         ...scholar,
                         stripeStatus: 'Action Required',
-                        payoutsEnabled: false
+                        payoutsEnabled: false,
+                        country: 'Finland',
+                        pendingBalance: pendingBalance.toFixed(2)
                     };
                 }
 
@@ -404,7 +434,8 @@ const getAllScholarsStripeStatus = async (req, res) => {
                         ...scholar,
                         stripeStatus: scholar.stripe_onboarding_complete ? 'Linked' : 'Incomplete',
                         payoutsEnabled: scholar.stripe_onboarding_complete || false,
-                        country: 'Finland'
+                        country: 'Finland',
+                        pendingBalance: pendingBalance.toFixed(2)
                     };
                 }
 
@@ -414,14 +445,17 @@ const getAllScholarsStripeStatus = async (req, res) => {
                         ...scholar,
                         stripeStatus: account.details_submitted ? 'Linked' : 'Incomplete',
                         payoutsEnabled: account.payouts_enabled,
-                        country: account.country
+                        country: countryNames[account.country] || account.country,
+                        pendingBalance: pendingBalance.toFixed(2)
                     };
                 } catch (error) {
                     console.error(`Error retrieving Stripe account for scholar ${scholar.id}:`, error.message);
                     return {
                         ...scholar,
                         stripeStatus: 'Error',
-                        payoutsEnabled: false
+                        payoutsEnabled: false,
+                        country: 'Finland',
+                        pendingBalance: pendingBalance.toFixed(2)
                     };
                 }
             })
