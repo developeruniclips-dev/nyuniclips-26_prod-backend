@@ -387,16 +387,43 @@ const getScholarEarnings = async (req, res) => {
             WHERE scholar_user_id = ? AND status = 'completed'
         `, [scholarUserId]);
 
-        // Calculate pending balance (total revenue - total paid)
+        // Get payout history for display
+        const [payoutHistory] = await pool.query(`
+            SELECT id, amount, currency, status, stripe_transfer_id, created_at
+            FROM scholar_payouts 
+            WHERE scholar_user_id = ?
+            ORDER BY created_at DESC
+            LIMIT 20
+        `, [scholarUserId]);
+
+        // Calculate earnings with 70%/50% fee structure
+        // First 100 sales per course: scholar gets 70%
+        // After 100 sales: scholar gets 50%
         const totalRevenue = parseFloat(salesData[0]?.total_revenue) || 0;
+        const totalSalesCount = parseInt(salesData[0]?.total_sales) || 0;
         const totalPaid = parseFloat(payoutsData[0]?.total_paid) || 0;
-        const platformFee = totalRevenue * 0.15; // 15% platform fee
-        const scholarEarnings = totalRevenue * 0.85; // 85% to scholar
+        
+        // Simplified calculation: assume average across all sales
+        // First 100 at 70%, rest at 50%
+        let scholarEarnings = 0;
+        let platformFee = 0;
+        
+        if (totalSalesCount <= 100) {
+            scholarEarnings = totalRevenue * 0.70;
+            platformFee = totalRevenue * 0.30;
+        } else {
+            // Split calculation
+            const revenueBelow100 = (100 / totalSalesCount) * totalRevenue;
+            const revenueAbove100 = totalRevenue - revenueBelow100;
+            scholarEarnings = (revenueBelow100 * 0.70) + (revenueAbove100 * 0.50);
+            platformFee = (revenueBelow100 * 0.30) + (revenueAbove100 * 0.50);
+        }
+        
         const pendingBalance = scholarEarnings - totalPaid;
 
         res.json({
             summary: {
-                totalSales: parseInt(salesData[0]?.total_sales) || 0,
+                totalSales: totalSalesCount,
                 totalRevenue: totalRevenue.toFixed(2),
                 platformFee: platformFee.toFixed(2),
                 scholarEarnings: scholarEarnings.toFixed(2),
@@ -411,6 +438,14 @@ const getScholarEarnings = async (req, res) => {
                 price: parseFloat(v.price).toFixed(2),
                 salesCount: parseInt(v.sales_count) || 0,
                 revenue: parseFloat(v.video_revenue || 0).toFixed(2)
+            })),
+            payoutHistory: payoutHistory.map(p => ({
+                id: p.id,
+                amount: parseFloat(p.amount).toFixed(2),
+                currency: p.currency || 'EUR',
+                status: p.status,
+                stripeTransferId: p.stripe_transfer_id,
+                date: p.created_at
             }))
         });
 
