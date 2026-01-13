@@ -445,8 +445,9 @@ const getScholarEarnings = async (req, res) => {
     try {
         const scholarUserId = req.user.id;
 
-        // Get total sales from purchases table (no status column exists)
-        const [salesData] = await pool.query(`
+        // Get total sales from BOTH purchases table (individual videos) AND subject_purchases (course bundles)
+        // Individual video purchases
+        const [videoSalesData] = await pool.query(`
             SELECT 
                 COUNT(p.id) as total_sales,
                 COALESCE(SUM(v.price), 0) as total_revenue
@@ -455,22 +456,35 @@ const getScholarEarnings = async (req, res) => {
             WHERE v.scholar_user_id = ?
         `, [scholarUserId]);
 
-        // Get sales by video
-        const [salesByVideo] = await pool.query(`
+        // Course bundle purchases
+        const [bundleSalesData] = await pool.query(`
             SELECT 
-                v.id,
-                v.title,
-                v.price,
-                s.name as subject_name,
-                COUNT(p.id) as sales_count,
-                COALESCE(SUM(v.price), 0) as video_revenue
-            FROM videos v
-            LEFT JOIN purchases p ON v.id = p.video_id
-            LEFT JOIN subjects s ON v.subject_id = s.id
-            WHERE v.scholar_user_id = ? AND v.approved = 1
-            GROUP BY v.id, v.title, v.price, s.name
-            ORDER BY sales_count DESC
+                COUNT(sp.id) as total_sales,
+                COALESCE(SUM(sp.amount), 0) as total_revenue
+            FROM subject_purchases sp
+            WHERE sp.scholar_id = ?
         `, [scholarUserId]);
+
+        // Combine both
+        const videoSales = parseInt(videoSalesData[0]?.total_sales) || 0;
+        const videoRevenue = parseFloat(videoSalesData[0]?.total_revenue) || 0;
+        const bundleSales = parseInt(bundleSalesData[0]?.total_sales) || 0;
+        const bundleRevenue = parseFloat(bundleSalesData[0]?.total_revenue) || 0;
+
+        // Get sales by course (bundles)
+        const [salesByCourse] = await pool.query(`
+            SELECT 
+                s.id,
+                s.name as course_name,
+                s.bundle_price,
+                COUNT(sp.id) as sales_count,
+                COALESCE(SUM(sp.amount), 0) as course_revenue
+            FROM subjects s
+            LEFT JOIN subject_purchases sp ON s.id = sp.subject_id AND sp.scholar_id = ?
+            JOIN scholar_subjects ss ON s.id = ss.subject_id AND ss.user_id = ?
+            GROUP BY s.id, s.name, s.bundle_price
+            ORDER BY sales_count DESC
+        `, [scholarUserId, scholarUserId]);
 
         // Get payouts received
         const [payoutsData] = await pool.query(`
@@ -490,14 +504,12 @@ const getScholarEarnings = async (req, res) => {
             LIMIT 20
         `, [scholarUserId]);
 
-        // Calculate earnings with 70%/50% fee structure
-        // First 100 sales per course: scholar gets 70%
-        // After 100 sales: scholar gets 50%
-        const totalRevenue = parseFloat(salesData[0]?.total_revenue) || 0;
-        const totalSalesCount = parseInt(salesData[0]?.total_sales) || 0;
+        // Calculate totals
+        const totalSalesCount = videoSales + bundleSales;
+        const totalRevenue = videoRevenue + bundleRevenue;
         const totalPaid = parseFloat(payoutsData[0]?.total_paid) || 0;
         
-        // Simplified calculation: assume average across all sales
+        // Calculate earnings with 70%/50% fee structure
         // First 100 at 70%, rest at 50%
         let scholarEarnings = 0;
         let platformFee = 0;
@@ -523,15 +535,17 @@ const getScholarEarnings = async (req, res) => {
                 scholarEarnings: scholarEarnings.toFixed(2),
                 totalPaid: totalPaid.toFixed(2),
                 pendingBalance: pendingBalance.toFixed(2),
-                payoutCount: parseInt(payoutsData[0]?.payout_count) || 0
+                payoutCount: parseInt(payoutsData[0]?.payout_count) || 0,
+                // Breakdown
+                videoSales: videoSales,
+                bundleSales: bundleSales
             },
-            salesByVideo: salesByVideo.map(v => ({
-                id: v.id,
-                title: v.title,
-                subject: v.subject_name,
-                price: parseFloat(v.price).toFixed(2),
-                salesCount: parseInt(v.sales_count) || 0,
-                revenue: parseFloat(v.video_revenue || 0).toFixed(2)
+            salesByCourse: salesByCourse.map(c => ({
+                id: c.id,
+                courseName: c.course_name,
+                bundlePrice: parseFloat(c.bundle_price || 0).toFixed(2),
+                salesCount: parseInt(c.sales_count) || 0,
+                revenue: parseFloat(c.course_revenue || 0).toFixed(2)
             })),
             payoutHistory: payoutHistory.map(p => ({
                 id: p.id,
