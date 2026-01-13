@@ -10,6 +10,7 @@ const DEFAULT_BUNDLE_PRICE = 6.00;
 // Platform fee structure:
 // - First 100 sales: UniClips keeps 30%, scholar gets 70%
 // - After 100 sales: UniClips keeps 50%, scholar gets 50%
+// NOTE: Stripe processing fees are deducted from UniClips' share, NOT the scholar's share
 const PLATFORM_FEE_FIRST_100 = 30;
 const PLATFORM_FEE_AFTER_100 = 50;
 const SALES_THRESHOLD = 100;
@@ -76,11 +77,14 @@ const createCheckoutSession = async (req, res) => {
     const platformFeePercent = await calculatePlatformFee(subjectId, scholarId);
     
     // Calculate amounts
+    // Scholar gets their full percentage (70% or 50%)
+    // UniClips pays Stripe fees from their share
     const totalAmountCents = Math.round(bundlePrice * 100);
-    const platformFeeCents = Math.round(totalAmountCents * (platformFeePercent / 100));
-    const scholarAmountCents = totalAmountCents - platformFeeCents;
+    const scholarPercent = 100 - platformFeePercent;
+    const scholarAmountCents = Math.round(totalAmountCents * (scholarPercent / 100));
 
     // Build checkout session config
+    // Using separate charges and transfers so Stripe fees come from UniClips' share
     const sessionConfig = {
       mode: 'payment',
       line_items: [
@@ -103,22 +107,17 @@ const createCheckoutSession = async (req, res) => {
         type: 'subject_bundle',
         bundlePrice: bundlePrice.toString(),
         platformFeePercent: platformFeePercent.toString(),
-        platformFee: (platformFeeCents / 100).toString(),
+        scholarPercent: scholarPercent.toString(),
         scholarAmount: (scholarAmountCents / 100).toString(),
+        scholarStripeAccountId: scholarStripeAccountId || '',
       },
       success_url: `${process.env.FRONTEND_URL}/course/${subjectId}/${scholarId}?payment=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.FRONTEND_URL}/course/${subjectId}/${scholarId}?payment=cancelled`,
     };
 
-    // If scholar has completed Stripe onboarding, use destination charges
-    if (scholarStripeAccountId && scholarOnboardingComplete) {
-      sessionConfig.payment_intent_data = {
-        application_fee_amount: platformFeeCents,
-        transfer_data: {
-          destination: scholarStripeAccountId,
-        },
-      };
-    }
+    // NOTE: We no longer use destination charges (payment_intent_data.transfer_data)
+    // Instead, we'll create a separate transfer after payment succeeds
+    // This way, Stripe fees come from UniClips' portion, not the scholar's
 
     // Create Stripe Checkout Session
     const session = await stripe.checkout.sessions.create(sessionConfig);
@@ -127,7 +126,6 @@ const createCheckoutSession = async (req, res) => {
       sessionId: session.id,
       url: session.url,
       amount: bundlePrice,
-      platformFee: platformFeeCents / 100,
       scholarAmount: scholarAmountCents / 100,
     });
   } catch (err) {
@@ -138,6 +136,8 @@ const createCheckoutSession = async (req, res) => {
 
 /**
  * Handle successful checkout - called by webhook or success page
+ * Creates a transfer to the scholar's Stripe account (separate charges and transfers)
+ * This ensures Stripe fees come from UniClips' share, not the scholar's
  */
 const handleCheckoutSuccess = async (req, res) => {
   try {
@@ -151,7 +151,7 @@ const handleCheckoutSuccess = async (req, res) => {
       return res.status(400).json({ message: "Payment not completed" });
     }
 
-    const { subjectId, scholarId, bundlePrice } = session.metadata;
+    const { subjectId, scholarId, bundlePrice, scholarAmount, scholarStripeAccountId } = session.metadata;
 
     // Check if already purchased (prevent double processing)
     const [existing] = await PurchaseModel.hasPurchasedSubject(buyerId, parseInt(subjectId), parseInt(scholarId));
@@ -160,6 +160,33 @@ const handleCheckoutSuccess = async (req, res) => {
         message: "Purchase already recorded",
         success: true 
       });
+    }
+
+    // Transfer scholar's share to their Stripe connected account
+    // This happens AFTER payment, so Stripe fees were already taken from the total
+    // UniClips pays those fees from their portion
+    if (scholarStripeAccountId) {
+      const scholarAmountCents = Math.round(parseFloat(scholarAmount) * 100);
+      
+      try {
+        await stripe.transfers.create({
+          amount: scholarAmountCents,
+          currency: 'eur',
+          destination: scholarStripeAccountId,
+          transfer_group: `purchase_${session.payment_intent}`,
+          metadata: {
+            subjectId: subjectId,
+            scholarId: scholarId,
+            buyerId: buyerId.toString(),
+            sessionId: sessionId,
+          },
+        });
+        console.log(`Transfer of €${scholarAmount} created for scholar ${scholarId}`);
+      } catch (transferErr) {
+        console.error("Error creating transfer to scholar:", transferErr);
+        // Don't fail the purchase - log for manual resolution
+        // The purchase should still be recorded
+      }
     }
 
     // Save the purchase
