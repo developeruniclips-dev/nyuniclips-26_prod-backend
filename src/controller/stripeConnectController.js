@@ -215,7 +215,8 @@ const getAccountStatus = async (req, res) => {
             await pool.query(
                 'UPDATE scholar_profile SET stripe_onboarding_complete = ?, stripe_details_submitted = ? WHERE user_id = ?',
                 [
-                    account.details_submitted ? 1 : 0,
+                    // Only mark as complete if BOTH details_submitted AND charges_enabled are true
+                    (account.details_submitted && account.charges_enabled) ? 1 : 0,
                     account.details_submitted ? 1 : 0,
                     scholarUserId
                 ]
@@ -224,15 +225,24 @@ const getAccountStatus = async (req, res) => {
             console.warn('Could not update stripe status columns:', updateError.message);
         }
 
+        // FIX: Only consider "linked" if onboarding is truly complete
+        // This requires both details_submitted AND charges_enabled
+        const isFullyOnboarded = account.details_submitted && account.charges_enabled;
+
         res.json({
-            connected: true,
+            connected: !!account.id, // Has a Stripe account ID
             accountId: account.id,
-            onboardingComplete: account.details_submitted,
+            onboardingComplete: isFullyOnboarded, // FIX: Must have charges enabled too
             detailsSubmitted: account.details_submitted,
             chargesEnabled: account.charges_enabled,
             payoutsEnabled: account.payouts_enabled,
             country: account.country,
             currency: account.default_currency,
+            // Add helpful message if onboarding incomplete
+            ...(account.id && !isFullyOnboarded && {
+                requiresAction: true,
+                message: 'Stripe onboarding incomplete. Please complete all required steps.'
+            })
         });
 
     } catch (error) {

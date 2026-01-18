@@ -201,4 +201,140 @@ const updateUserProfile = async (req, res) => {
     }
 };
 
-module.exports = { getAllUsers, getOneUser, updateUser, deleteUser, getUserProfile, updateUserProfile };
+// Delete user account (SuperAdmin only - can delete any user including admins)
+const deleteUserBySuperAdmin = async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        const requestingUserRoles = req.user.roles || [];
+
+        // Only SuperAdmin can use this endpoint
+        if (!requestingUserRoles.includes('SuperAdmin')) {
+            return res.status(403).json({ message: "Only SuperAdmin can delete accounts" });
+        }
+
+        const [existing] = await UserModel.findById(id);
+        if (existing.length === 0) {
+            return res.status(404).json({ message: "User not found" });
+        }
+
+        // Check if target user is a SuperAdmin - prevent deleting other SuperAdmins
+        const [targetRoles] = await pool.query(
+            `SELECT r.name FROM roles r 
+             JOIN user_roles ur ON r.id = ur.role_id 
+             WHERE ur.user_id = ?`,
+            [id]
+        );
+        const targetUserRoles = targetRoles.map(r => r.name);
+        
+        if (targetUserRoles.includes('SuperAdmin') && id !== req.user.id) {
+            return res.status(403).json({ message: "Cannot delete another SuperAdmin account" });
+        }
+
+        await UserModel.delete(id);
+        res.json({ message: "User account deleted successfully by SuperAdmin" });
+    } catch (error) {
+        console.error("Error deleting user by SuperAdmin:", error);
+        res.status(500).json({ message: "Server error deleting user" });
+    }
+};
+
+// Get all users with roles (for SuperAdmin view)
+const getAllUsersWithRoles = async (req, res) => {
+    try {
+        const [rows] = await pool.query(`
+            SELECT 
+                u.id, 
+                u.fname, 
+                u.lname, 
+                u.email, 
+                u.created_at,
+                GROUP_CONCAT(DISTINCT r.name) as roles,
+                CASE 
+                    WHEN sp.id IS NOT NULL THEN 1
+                    ELSE 0 
+                END as is_scholar
+            FROM users u
+            LEFT JOIN scholar_profile sp ON u.id = sp.user_id
+            LEFT JOIN user_roles ur ON u.id = ur.user_id
+            LEFT JOIN roles r ON ur.role_id = r.id
+            GROUP BY u.id
+            ORDER BY u.id ASC
+        `);
+        
+        // Parse roles string to array
+        const usersWithRoles = rows.map(user => ({
+            ...user,
+            roles: user.roles ? user.roles.split(',') : []
+        }));
+        
+        res.status(200).json(usersWithRoles);
+    } catch (error) {
+        console.error("Error fetching users with roles:", error);
+        res.status(500).json({ message: "Internal server error" });
+    }
+};
+
+// Create SuperAdmin (can only be done by existing SuperAdmin or initial setup)
+const createSuperAdmin = async (req, res) => {
+    try {
+        const { email, password, fname, lname, secretKey } = req.body;
+        
+        // Check if this is initial setup (no SuperAdmin exists) or authorized request
+        const [existingSuperAdmins] = await pool.query(`
+            SELECT u.id FROM users u
+            JOIN user_roles ur ON u.id = ur.user_id
+            JOIN roles r ON ur.role_id = r.id
+            WHERE r.name = 'SuperAdmin'
+        `);
+        
+        // If SuperAdmin exists, require either SuperAdmin role or secret key
+        if (existingSuperAdmins.length > 0) {
+            const requestingUserRoles = req.user?.roles || [];
+            const isAuthorized = requestingUserRoles.includes('SuperAdmin') || 
+                                 secretKey === process.env.SUPER_ADMIN_SECRET_KEY;
+            
+            if (!isAuthorized) {
+                return res.status(403).json({ 
+                    message: "Only existing SuperAdmin can create new SuperAdmin accounts" 
+                });
+            }
+        }
+        
+        // Check if user already exists
+        const [existing] = await UserModel.findByEmail(email);
+        if (existing.length > 0) {
+            return res.status(400).json({ message: "User with this email already exists" });
+        }
+        
+        // Create the user
+        const bcrypt = require('bcryptjs');
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const [result] = await UserModel.create(fname, lname, email, hashedPassword, 0);
+        const userId = result.insertId;
+        
+        // Assign SuperAdmin role (role_id = 4)
+        await pool.query("INSERT IGNORE INTO user_roles (user_id, role_id) VALUES (?, 4)", [userId]);
+        // Also assign Admin role for backwards compatibility
+        await pool.query("INSERT IGNORE INTO user_roles (user_id, role_id) VALUES (?, 1)", [userId]);
+        
+        res.status(201).json({ 
+            message: "SuperAdmin created successfully",
+            userId: userId
+        });
+    } catch (error) {
+        console.error("Error creating SuperAdmin:", error);
+        res.status(500).json({ message: "Server error creating SuperAdmin" });
+    }
+};
+
+module.exports = { 
+    getAllUsers, 
+    getOneUser, 
+    updateUser, 
+    deleteUser, 
+    getUserProfile, 
+    updateUserProfile,
+    deleteUserBySuperAdmin,
+    getAllUsersWithRoles,
+    createSuperAdmin
+};

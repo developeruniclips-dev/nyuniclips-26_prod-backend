@@ -2,6 +2,8 @@ const { pool } = require("../config/db");
 
 // Subject bundle price in EUR
 const SUBJECT_BUNDLE_PRICE = 6.00;
+// Course access duration in months
+const ACCESS_DURATION_MONTHS = 5;
 
 const PurchaseModel = {
   // Legacy video-based purchases (keep for backwards compatibility)
@@ -28,31 +30,68 @@ const PurchaseModel = {
     );
   },
 
-  // NEW: Subject bundle purchases (€6 per subject)
+  // NEW: Subject bundle purchases with 5-month access expiry
   purchaseSubjectBundle: (buyerUserId, subjectId, scholarId, amount = SUBJECT_BUNDLE_PRICE, transactionId = null) => {
+    // Calculate access expiry date (5 months from now)
     return pool.query(
-      `INSERT INTO subject_purchases (buyer_user_id, subject_id, scholar_id, amount, currency, transaction_id) 
-       VALUES (?, ?, ?, ?, 'EUR', ?)`,
-      [buyerUserId, subjectId, scholarId, amount, transactionId]
+      `INSERT INTO subject_purchases (buyer_user_id, subject_id, scholar_id, amount, currency, transaction_id, access_expires_at, is_access_active) 
+       VALUES (?, ?, ?, ?, 'EUR', ?, DATE_ADD(NOW(), INTERVAL ? MONTH), 1)`,
+      [buyerUserId, subjectId, scholarId, amount, transactionId, ACCESS_DURATION_MONTHS]
     );
   },
 
+  // Check if user has ACTIVE (non-expired) access to subject
   hasPurchasedSubject: (buyerUserId, subjectId, scholarId) => {
     return pool.query(
-      `SELECT * FROM subject_purchases WHERE buyer_user_id = ? AND subject_id = ? AND scholar_id = ?`,
+      `SELECT *, 
+        CASE WHEN access_expires_at IS NULL OR access_expires_at > NOW() THEN 1 ELSE 0 END as is_active,
+        DATEDIFF(access_expires_at, NOW()) as days_remaining
+       FROM subject_purchases 
+       WHERE buyer_user_id = ? AND subject_id = ? AND scholar_id = ?`,
       [buyerUserId, subjectId, scholarId]
     );
   },
 
-  // Get all subject bundles purchased by user
+  // Check if access is still valid (not expired)
+  hasActiveAccess: async (buyerUserId, subjectId, scholarId) => {
+    const [rows] = await pool.query(
+      `SELECT id FROM subject_purchases 
+       WHERE buyer_user_id = ? AND subject_id = ? AND scholar_id = ?
+       AND (access_expires_at IS NULL OR access_expires_at > NOW())
+       AND is_access_active = 1`,
+      [buyerUserId, subjectId, scholarId]
+    );
+    return rows.length > 0;
+  },
+
+  // Get all subject bundles purchased by user with access status
   getUserSubjectPurchases: (buyerUserId) => {
     return pool.query(
-      `SELECT sp.*, s.name as subject_name, u.fname as scholar_fname, u.lname as scholar_lname
+      `SELECT sp.*, s.name as subject_name, u.fname as scholar_fname, u.lname as scholar_lname,
+        CASE WHEN sp.access_expires_at IS NULL OR sp.access_expires_at > NOW() THEN 1 ELSE 0 END as is_active,
+        DATEDIFF(sp.access_expires_at, NOW()) as days_remaining,
+        sp.access_expires_at
        FROM subject_purchases sp
        JOIN subjects s ON sp.subject_id = s.id
        JOIN users u ON sp.scholar_id = u.id
        WHERE sp.buyer_user_id = ?
        ORDER BY sp.created_at DESC`,
+      [buyerUserId]
+    );
+  },
+
+  // Get expired purchases (for repurchase prompts)
+  getExpiredPurchases: (buyerUserId) => {
+    return pool.query(
+      `SELECT sp.*, s.name as subject_name, u.fname as scholar_fname, u.lname as scholar_lname,
+        s.bundle_price as current_price
+       FROM subject_purchases sp
+       JOIN subjects s ON sp.subject_id = s.id
+       JOIN users u ON sp.scholar_id = u.id
+       WHERE sp.buyer_user_id = ? 
+       AND sp.access_expires_at IS NOT NULL 
+       AND sp.access_expires_at <= NOW()
+       ORDER BY sp.access_expires_at DESC`,
       [buyerUserId]
     );
   },
@@ -68,7 +107,21 @@ const PurchaseModel = {
        ORDER BY sp.created_at DESC`,
       [scholarId]
     );
+  },
+
+  // Renew access for an expired purchase (repurchase at current price)
+  renewAccess: (purchaseId, newAmount, transactionId = null) => {
+    return pool.query(
+      `UPDATE subject_purchases 
+       SET access_expires_at = DATE_ADD(NOW(), INTERVAL ? MONTH),
+           is_access_active = 1,
+           amount = ?,
+           transaction_id = COALESCE(?, transaction_id),
+           renewed_at = NOW()
+       WHERE id = ?`,
+      [ACCESS_DURATION_MONTHS, newAmount, transactionId, purchaseId]
+    );
   }
 };
 
-module.exports = { PurchaseModel, SUBJECT_BUNDLE_PRICE };
+module.exports = { PurchaseModel, SUBJECT_BUNDLE_PRICE, ACCESS_DURATION_MONTHS };
